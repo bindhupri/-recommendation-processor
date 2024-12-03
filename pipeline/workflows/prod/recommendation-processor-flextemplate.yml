@@ -1,0 +1,240 @@
+# This is a Generic WorkFlow that Processes the Recommendations
+#
+# This workflow passes the region where the workflow is deployed
+# This Workflow passes the event payload received from input and processes them
+# A region is retrieved from the GOOGLE_CLOUD_LOCATION system variable.
+main:
+  params: [ event ]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event.data}
+          severity: INFO
+    - extract_bucket_object:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+    - read_from_gcs_bucket:
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: ${bucket}
+          object: ${object}
+          alt: "media"
+        result: gcs_result
+        next: init
+    - init:
+        assign:
+          - requestPayloadList: ${text.split(text.decode(gcs_result),"\n")}
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - location: "us-central1"
+          - zone: "us-central1-a"
+          - temp_location: ${sys.get_env("TEMP_LOCATION")}
+          - serviceAccount: ${sys.get_env("SERVICE_ACCOUNT")}
+          - usePublicIps: false
+          - outPutFilePath: ${sys.get_env("OUTPUT_FILE_PATH")}
+          - runner: "DataflowRunner"
+          - uuid_var: ${uuid.generate()}
+          - processorVarWriteToCosmos: "N"
+          - processorVarWriteToBigQuery: "N"
+          - processorVarWriteToCloudStorage: "N"
+          - processorVarCardHolderRecommendation: "N"
+          - template_version: "0.0.4"
+          - recommendationProcessorJobName: "jenkins-recommendations-flex"
+          - recommendationProcessorTemplatePath: "gs://recommendation-pipeline/templates/recommendation-processor-java-0.0.4.json"
+          - failureStatuses:
+              [
+                "JOB_STATE_FAILED",
+                "JOB_STATE_CANCELLED",
+                "JOB_STATE_UPDATED",
+                "JOB_STATE_DRAINED",
+              ]
+          - currentStatus: ""
+          - input: ""
+          - workflowResponse: [ ]
+          - currentDate: ${text.substring(time.format(sys.now()), 0, 10)}
+    - readRequestPayload:
+        for:
+          value: requestPayload
+          in: ${requestPayloadList}
+          steps:
+            - validateRequest:
+                switch:
+                  - condition: ${ requestPayload != "" }
+                    steps:
+                      - stepRequestValidation:
+                          assign:
+                            - input: ${json.decode(requestPayload)}
+                      - logRequest:
+                          call: sys.log
+                          args:
+                            text: ${json.decode(requestPayload)}
+                            severity: INFO
+                      - retrieve_attributes:
+                          assign:
+                            - file_path: ${input.filepath}
+                            - module: ${input.module}
+                            - feed_type: ${input.feed_type}
+                            - recommendationProcessorJobName: ${text.replace_all(recommendationProcessorJobName + "-" + module + "-" + feed_type,"_","-")}
+                    next: checkModuleType
+                next: invalid_request
+            - log_uuid:
+                call: sys.log
+                args:
+                  text: ${uuid_var}
+                  severity: INFO
+            - checkModuleType:
+                switch:
+                  - condition: ${feed_type == "warm-start"}
+                    steps:
+                      - stepFeed:
+                          switch:
+                            - condition: ${module == "savings"}
+                              steps:
+                                - stepSavingsWarm:
+                                    assign:
+                                      - processorVarWriteToBigQuery: "Y"
+                                      - file_path: ${file_path + "/*.parquet"}
+                              next: recommendation_processor
+                            - condition: ${module ==  "sng_landing_page"}
+                              steps:
+                                - stepLandingWarm:
+                                    assign:
+                                      - processorVarWriteToBigQuery: "Y"
+                                      - file_path: ${file_path + "/*.parquet"}
+                              next: recommendation_processor
+                            - condition: ${module == "rye"}
+                              steps:
+                                - stepRye:
+                                    assign:
+                                      - processorVarWriteToCosmos: "Y"
+                                      - outPutFilePath: ${outPutFilePath + "/" + "rye_cosmos_failure" + "/" + currentDate + "/"}
+                                      - file_path: ${file_path + "/*.parquet"}
+                              next: recommendation_processor
+                            - condition: ${module == "rye_cosmos_failure"}
+                              steps:
+                                - stepRyeFailure:
+                                    assign:
+                                      - processorVarWriteToCosmos: "Y"
+                                      - outPutFilePath: ${outPutFilePath + "/" + "rye_cosmos_failure" + "/" + currentDate + "/"}
+                                      - file_path: ${file_path + "/*.txt"}
+                              next: recommendation_processor
+                            - condition: ${module == "landing_cosmos_failure"}
+                              steps:
+                                - stepSngFailure:
+                                    assign:
+                                      - processorVarWriteToCosmos: "Y"
+                                      - outPutFilePath: ${outPutFilePath + "/" + "rye_cosmos_failure" + "/" + currentDate + "/"}
+                                      - file_path: ${file_path + "/*.parquet"}
+                  - condition: ${feed_type == "cold-start"}
+                    steps:
+                      - stepModule:
+                          switch:
+                            - condition: ${module == "savings"}
+                              steps:
+                                - stepSavingsCold:
+                                    assign:
+                                      - processorVarWriteToCloudStorage: "Y"
+                                      - file_path: ${file_path + "/*.parquet"}
+                            - condition: ${module == "sng_landing_page"}
+                              steps:
+                                - stepLandingCold:
+                                    assign:
+                                      - outPutFilePath: ${outPutFilePath + "/" + "sng_cosmos_failure" + "/" + currentDate + "/"}
+                                      - processorVarWriteToCosmos: "Y"
+                                      - file_path: ${file_path + "/*.parquet"}
+                    next: recommendation_processor
+            - recommendation_processor:
+                steps:
+                  - launchProcessor:
+                      call: googleapis.dataflow.v1b3.projects.locations.flexTemplates.launch
+                      args:
+                        projectId: ${project_id}
+                        location: ${location}
+                        body:
+                          launchParameter:
+                            jobName: ${recommendationProcessorJobName}
+                            containerSpecGcsPath: ${recommendationProcessorTemplatePath}
+                            parameters:
+                              uuidToAudit: ${uuid_var}
+                              inputFile: ${file_path}
+                              outPutFilePath: ${outPutFilePath}
+                              module: ${module}
+                              feedType: ${feed_type}
+                              writeToCosmos: ${processorVarWriteToCosmos}
+                              writeToCloudStorage: ${processorVarWriteToCloudStorage}
+                              writeToBigQuery: ${processorVarWriteToBigQuery}
+                              cardHolderRecommendation: ${processorVarCardHolderRecommendation}
+                              cosmosBatchSize: ${sys.get_env("COSMOS_BATCH_SIZE")}
+                            environment:
+                              serviceAccountEmail: ${serviceAccount}
+                      result: launchResult
+            - check_processor:
+                switch:
+                  - condition: ${processorVarWriteToBigQuery == "Y"}
+                    next: check_job_status
+                  - condition: ${processorVarWriteToBigQuery == "N"}
+                    next: return_result
+            - check_job_status:
+                switch:
+                  - condition: ${currentStatus in failureStatuses}
+                    next: exit_fail
+                  - condition: ${currentStatus != "JOB_STATE_DONE"}
+                    next: iterate
+                  - condition: ${currentStatus == "JOB_STATE_DONE"}
+                    steps:
+                      - stepReassignVars:
+                          switch:
+                            - condition: ${module == "savings"}
+                              steps:
+                                - stepReassignSavings:
+                                    assign:
+                                      - processorVarCardHolderRecommendation: "Y"
+                                      - processorVarWriteToBigQuery: "N"
+                                      - processorVarWriteToCloudStorage: "Y"
+                                      - processorVarWriteToCosmos: "N"
+                              next: recommendation_processor
+                            - condition: ${module == "sng_landing_page"}
+                              steps:
+                                - stepReassignLanding:
+                                    assign:
+                                      - outPutFilePath: ${outPutFilePath + "/" + "sng_cosmos_failure" + "/" + currentDate + "/"}
+                                      - processorVarCardHolderRecommendation: "Y"
+                                      - processorVarWriteToBigQuery: "N"
+                                      - processorVarWriteToCloudStorage: "N"
+                                      - processorVarWriteToCosmos: "Y"
+                              next: recommendation_processor
+            - iterate:
+                steps:
+                  - sleep30s:
+                      call: sys.sleep
+                      args:
+                        seconds: 30
+                  - get:
+                      call: googleapis.dataflow.v1b3.projects.jobs.get
+                      args:
+                        jobId: ${launchResult.job.id}
+                        projectId: ${project_id}
+                        location: ${location}
+                      result: pipelineJobResult
+                  - getStatus:
+                      assign:
+                        - currentStatus: ${pipelineJobResult.currentState}
+                  - log:
+                      call: sys.log
+                      args:
+                        text: ${"Current job status="+currentStatus}
+                      next: check_job_status
+                next: return_result
+            - exit_fail:
+                raise: ${"Job in unexpected terminal status "+currentStatus}
+            - return_result:
+                return: ${list.concat(workflowResponse,launchResult)}
+            - invalid_request:
+                steps:
+                  - stepAssignResponse:
+                      assign:
+                        - workflowResponse: ${list.concat(workflowResponse,"Invalid_Request")}
+                      next: stepInvalid
+                  - stepInvalid:
+                      raise: ${workflowResponse}

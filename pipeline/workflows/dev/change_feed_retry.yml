@@ -1,0 +1,47 @@
+# This is a sample workflow to test or replace with your source code.
+#
+# This workflow passes the region where the workflow is deployed
+# to the Wikipedia API and returns a list of related Wikipedia articles.
+# A region is retrieved from the GOOGLE_CLOUD_LOCATION system variable
+# unless you input your own search term; for example, {"searchTerm": "asia"}.
+main:
+  params: [ input ]
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - location: "us-central1"
+          - zone: "us-central1-a"
+          - temp_location: "gs://datageneratorbigquerytemp"
+          - change_feed_failure_template_path: "gs://workflow_bigquery_templates/templates/ChangeFeedFailureProcessor"
+          - change_feed_retry_job_name: "change-feed-failure-processor"
+          - serviceAccount: "svc-deploy-mgmt@dev-sams-data-generator.iam.gserviceaccount.com"
+          - usePublicIps: "false"
+          - outPutFilePath: "gs://processed_recommendations"
+          - runner: "DataflowRunner"
+          - autoscalingAlgorithm: "THROUGHPUT_BASED"
+          - workerMachineType: "n1-standard-1"
+          - temp_location: "gs://datageneratorbigquerytemp"
+          - output_file: "gs://processed_recommendations"
+    - start_change_feed_retry:
+        steps:
+          - launchChangeFeedRetry:
+              call: googleapis.dataflow.v1b3.projects.locations.templates.launch
+              args:
+                projectId: ${project_id}
+                location: ${location}
+                validateOnly: false
+                gcsPath: ${change_feed_failure_template_path}
+                body:
+                  jobName: ${change_feed_retry_job_name}
+                  parameters:
+                    inputFile: ${input.input_file}
+                    outPutFilePath: ${output_file}
+                  environment:
+                    numWorkers: 1
+                    tempLocation: ${temp_location}
+                    serviceAccountEmail: ${serviceAccount}
+              result: retryResult
+        next: return_result
+    - return_result:
+        return: ${retryResult}

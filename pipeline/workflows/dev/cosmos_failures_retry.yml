@@ -1,0 +1,36 @@
+# This is a sample workflow to test or replace with your source code.
+#
+# This workflow passes the region where the workflow is deployed
+# to the Wikipedia API and returns a list of related Wikipedia articles.
+# A region is retrieved from the GOOGLE_CLOUD_LOCATION system variable
+# unless you input your own search term; for example, {"searchTerm": "asia"}.
+main:
+  params: [ input ]
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - location: "us-central1"
+          - currentDate: ${text.substring(time.format(sys.now()), 0, 10)}
+          - module: ${input.module}
+          - file_path: ${"gs://processed_recommendations/"+ module +"/" + currentDate + "/**" }
+          - feed_type: "warm_start"
+    - createMap:
+        assign:
+          - payLoad:
+              file_path: ${file_path}
+              module: ${module}
+              feed_type: ${feed_type}
+    - start_change_feed_retry:
+        steps:
+          - publish_message_topic:
+              call: googleapis.workflowexecutions.v1beta.projects.locations.workflows.executions.run
+              args:
+                workflow_id: "publish_message_topic"
+                location: ${location}
+                project_id: ${project_id}
+                argument: ${payLoad}
+              result: workflowResult
+        next: return_result
+    - return_result:
+        return: ${workflowResult}

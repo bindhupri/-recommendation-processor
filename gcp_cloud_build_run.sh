@@ -1,0 +1,17 @@
+echo "Establishing proxy connection to connect to GCS"
+set -e
+gcloud config set proxy/type http
+gcloud config set proxy/address proxy.wal-mart.com
+gcloud config set proxy/port 9080
+
+
+
+gcloud config set project $PROJECT_NAME
+echo "Activating Service Account"
+
+echo "Creds Location For Service Account: $GOOGLE_CREDENTIALS"
+
+gcloud auth activate-service-account --key-file=$GOOGLE_CREDENTIALS
+
+echo "Running GCloud Command"
+gcloud builds submit --region=$LOCATION --impersonate-service-account=$SERVICE_ACCOUNT  --config=$BUILD_CONFIG_FILE --substitutions=_PROJECT_ID=$PROJECT_NAME,_LOCATION=$LOCATION,_METADATA_JSON_FILE=$METADATA_FILE,_FLEX_TEMPLATE_FILE_LOCATION=$FLEX_TEMPLATE_FILE_LOCATION,_ARTIFACTORY_PATH_VERSION=$ARTIFACTORY_PATH_VERSION,_SDK_LANGUAGE=$SDK_LANGUAGE,_FLEX_TEMPLATE_BASE_IMAGE=$FLEX_TEMPLATE_BASE_IMAGE,_GCS_BUILD_LOG_DIR=$GCS_BUILD_LOG_DIR,_VPC_SUB_NETWORK=$VPC_SUB_NETWORK,_STAGING_LOCATION=$STAGING_LOCATION,_GCS_TEMP_LOCATION=$GCS_TEMP_LOCATION,_FLEX_TEMPLATE_JAVA_MAIN_CLASS=$FLEX_TEMPLATE_JAVA_MAIN_CLASS,_JAR=$JAR,_SERVICE_ACCOUNT=$SERVICE_ACCOUNT,_OUTPUT_FILE_PATH=$OUTPUT_FILE_PATH,_COSMOS_BATCH_SIZE=$COSMOS_BATCH_SIZE,_ENVIRONMENT=$ENVIRONMENT . --async

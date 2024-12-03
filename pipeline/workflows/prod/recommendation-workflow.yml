@@ -1,0 +1,270 @@
+# This is a Generic WorkFlow that Processes the Recommendations
+#
+# This workflow passes the region where the workflow is deployed
+# This Workflow passes the event payload received from input and processes them
+# A region is retrieved from the GOOGLE_CLOUD_LOCATION system variable.
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event.data}
+          severity: INFO
+    - extract_bucket_object:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+    - read_from_gcs_bucket:
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: ${bucket}
+          object: ${object}
+          alt: "media"
+        result: gcs_result_json
+        next: init
+    - init:
+        assign:
+          - requestPayloadList: ${text.split(text.decode(gcs_result_json),"\n")}
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - location: "us-central1"
+          - zone: "us-central1-a"
+          - temp_location: "gs://recommendation-pipeline/temp"
+          - serviceAccount: "svc-deploy-mgmt@prod-recommendation-processor.iam.gserviceaccount.com"
+          - usePublicIps: "false"
+          - outPutFilePath: "gs://prod-recommendation-cosmos"
+          - runner: "DataflowRunner"
+          - recommendationPipelineTemplatePath: "gs://recommendation-pipeline/templates/RecommendationPipeline"
+          - recommendationProcessorTemplatePath: "gs://recommendation-pipeline/templates/RecommendationProcessor"
+          - recommendationProcessorTemplatePathToUse: ""
+          - recommendationPipelineTemplatePathToUse: ""
+          - landingPageWarmPipelinePath: "gs://recommendation-pipeline/templates/LandingWarmRecommendationPipeline"
+          - landingPageWarmProcessorPath: "gs://recommendation-pipeline/templates/LandingWarmRecommendationProcessor"
+          - landingPageColdPipelinePath: "gs://recommendation-pipeline/templates/LandingColdRecommendationPipeline"
+          - uuid_var: ${uuid.generate()}
+          - pipelineVarWriteToCosmos: ""
+          - pipelineVarWriteToCloudStorage: ""
+          - pipelineVarWriteToBigQuery: ""
+          - processorVarWriteToCosmos: ""
+          - processorVarWriteToBigQuery: ""
+          - processorVarWriteToCloudStorage: ""
+          - recommendationProcessorJobName: "jenkins-recommendation-processor"
+          - recommendationPipelineJobName: "jenkins-recommendation-pipeline"
+          - template_version: "0.0.2"
+          - template_branch: "main"
+          - failureStatuses:
+              [
+                "JOB_STATE_FAILED",
+                "JOB_STATE_CANCELLED",
+                "JOB_STATE_UPDATED",
+                "JOB_STATE_DRAINED",
+              ]
+          - currentStatus: ""
+          - workflowResponse: []
+    - readRequestPayload:
+        for:
+          value: requestPayload
+          in: ${requestPayloadList}
+          steps:
+            - validateRequest:
+                switch:
+                  - condition: ${requestPayload != ""}
+                    steps:
+                      - stepRequestValidation:
+                          assign:
+                            - input: ${json.decode(requestPayload)}
+                      - logRequest:
+                          call: sys.log
+                          args:
+                            text: ${json.decode(requestPayload)}
+                            severity: INFO
+                      - retrive_attributes:
+                          assign:
+                            - file_path: ${input.filepath}
+                            - module: ${input.module}
+                            - feed_type: ${input.feed_type}
+                      - log_uuid:
+                          call: sys.log
+                          args:
+                            text: ${uuid_var}
+                            severity: INFO
+                      - checkModuleType:
+                          switch:
+                            - condition: ${feed_type == "warm-start"}
+                              steps:
+                                - stepFeed:
+                                    switch:
+                                      - condition: ${module == "savings"}
+                                        steps:
+                                          - stepSavingsWarm:
+                                              assign:
+                                                - pipelineVarWriteToCosmos: "N"
+                                                - pipelineVarWriteToCloudStorage: "N"
+                                                - pipelineVarWriteToBigQuery: "Y"
+                                                - processorVarWriteToCosmos: "N"
+                                                - processorVarWriteToBigQuery: "N"
+                                                - processorVarWriteToCloudStorage: "Y"
+                                                - recommendationPipelineTemplatePathToUse: ${recommendationPipelineTemplatePath}
+                                                - recommendationProcessorTemplatePathToUse: ${recommendationProcessorTemplatePath}
+                                        next: run_recommendation_pipeline
+                                      - condition: ${module ==  "sng_landing_page"}
+                                        steps:
+                                          - stepLandingWarm:
+                                              assign:
+                                                - pipelineVarWriteToCosmos: "N"
+                                                - pipelineVarWriteToCloudStorage: "N"
+                                                - pipelineVarWriteToBigQuery: "Y"
+                                                - processorVarWriteToCosmos: "Y"
+                                                - processorVarWriteToBigQuery: "N"
+                                                - processorVarWriteToCloudStorage: "N"
+                                                - recommendationPipelineTemplatePathToUse: ${landingPageWarmPipelinePath}
+                                                - recommendationProcessorTemplatePathToUse: ${landingPageWarmProcessorPath}
+                                        next: run_recommendation_pipeline
+                            - condition: ${feed_type == "cold-start"}
+                              steps:
+                                - stepModule:
+                                    switch:
+                                      - condition: ${module == "savings"}
+                                        steps:
+                                          - stepSavingsCold:
+                                              assign:
+                                                - pipelineVarWriteToCosmos: "N"
+                                                - pipelineVarWriteToCloudStorage: "Y"
+                                                - pipelineVarWriteToBigQuery: "N"
+                                                - recommendationPipelineTemplatePathToUse: ${recommendationPipelineTemplatePath}
+                                        next: run_recommendation_pipeline
+                                      - condition: ${module == "sng_landing_page"}
+                                        steps:
+                                          - stepLandingCold:
+                                              assign:
+                                                - pipelineVarWriteToCosmos: "Y"
+                                                - pipelineVarWriteToCloudStorage: "N"
+                                                - pipelineVarWriteToBigQuery: "N"
+                                                - recommendationPipelineTemplatePathToUse: ${landingPageWarmPipelinePath}
+                                        next: run_recommendation_pipeline
+                            - condition: ${module == "persist"}
+                              steps:
+                                - stepPersistModule:
+                                    assign:
+                                      - pipelineVarWriteToCosmos: "Y"
+                                      - pipelineVarWriteToCloudStorage: "N"
+                                      - pipelineVarWriteToBigQuery: "N"
+                            - condition: ${module == "rye"}
+                              steps:
+                                - stepRyeModule:
+                                    assign:
+                                      - pipelineVarWriteToCosmos: "N"
+                                      - pipelineVarWriteToCloudStorage: "N"
+                                      - pipelineVarWriteToBigQuery: "Y"
+                                      - processorVarWriteToBigQuery: "N"
+                                      - processorVarWriteToCosmos: "Y"
+                                      - processorVarWriteToCloudStorage: "N"
+                            - condition: ${module == "complimentary"}
+                              steps:
+                                - stepCompModule:
+                                    assign:
+                                      - pipelineVarWriteToBigQuery: "N"
+                                      - pipelineVarWriteToCloudStorage: "N"
+                                      - pipelineVarWriteToCosmos: "Y"
+                      - run_recommendation_pipeline:
+                          steps:
+                            - launchRecoPipeline:
+                                call: googleapis.dataflow.v1b3.projects.locations.templates.launch
+                                args:
+                                  projectId: ${project_id}
+                                  location: ${location}
+                                  validateOnly: false
+                                  gcsPath: ${recommendationPipelineTemplatePathToUse + "-" + template_version + "-" + template_branch}
+                                  body:
+                                    jobName: ${recommendationPipelineJobName + "-" + module + "-" + feed_type}
+                                    parameters:
+                                      inputFile: ${file_path + "/*.parquet"}
+                                      UUIDToAudit: ${uuid_var}
+                                      outPutFilePath: ${outPutFilePath}
+                                      writeToCosmos: ${pipelineVarWriteToCosmos}
+                                      writeToCloudStorage: ${pipelineVarWriteToCloudStorage}
+                                      writeToBigQuery: ${pipelineVarWriteToBigQuery}
+                                      module: ${module}
+                                      feedType: ${feed_type}
+                                    environment:
+                                      machineType: "n1-highmem-8"
+                                      numWorkers: 1
+                                      tempLocation: ${temp_location}
+                                      serviceAccountEmail: ${serviceAccount}
+                                result: launchResult
+                      - check_processor:
+                          switch:
+                            - condition: ${pipelineVarWriteToBigQuery == "Y"}
+                              next: check_job_status
+                            - condition: ${pipelineVarWriteToBigQuery == "N"}
+                              next: build_response
+                      - check_job_status:
+                          switch:
+                            - condition: ${currentStatus in failureStatuses}
+                              next: exit_fail
+                            - condition: ${currentStatus != "JOB_STATE_DONE"}
+                              next: iterate
+                            - condition: ${currentStatus == "JOB_STATE_DONE"}
+                              next: recommendation_processor
+                      - iterate:
+                          steps:
+                            - sleep30s:
+                                call: sys.sleep
+                                args:
+                                  seconds: 30
+                            - get:
+                                call: googleapis.dataflow.v1b3.projects.jobs.get
+                                args:
+                                  jobId: ${launchResult.job.id}
+                                  projectId: ${project_id}
+                                  location: ${location}
+                                result: pipelineJobResult
+                            - getStatus:
+                                assign:
+                                  - currentStatus: ${pipelineJobResult.currentState}
+                            - log:
+                                call: sys.log
+                                args:
+                                  text: ${"Current job status="+currentStatus}
+                                next: check_job_status
+                      - recommendation_processor:
+                          steps:
+                            - launchProcessor:
+                                call: googleapis.dataflow.v1b3.projects.locations.templates.launch
+                                args:
+                                  projectId: ${project_id}
+                                  location: ${location}
+                                  validateOnly: false
+                                  gcsPath: ${recommendationProcessorTemplatePathToUse + "-" + template_version + "-" + template_branch}
+                                  body:
+                                    jobName: ${recommendationProcessorJobName + "-" + module + "-" + feed_type}
+                                    parameters:
+                                      UUIDToAudit: ${uuid_var}
+                                      inputFile: ${file_path + "/*.parquet"}
+                                      outPutFilePath: ${outPutFilePath}
+                                      module: ${module}
+                                      feedType: ${feed_type}
+                                      writeToCosmos: ${processorVarWriteToCosmos}
+                                      writeToCloudStorage: ${processorVarWriteToCloudStorage}
+                                      writeToBigQuery: ${processorVarWriteToBigQuery}
+                                    environment:
+                                      machineType: "n1-highmem-8"
+                                      numWorkers: 1
+                                      tempLocation: ${temp_location}
+                                      serviceAccountEmail: ${serviceAccount}
+                                result: launchResultProcessor
+                          next: build_response
+                      - exit_fail:
+                          raise: ${"Job in unexpected terminal status "+currentStatus}
+                      - build_response:
+                          steps:
+                            - stepBuildResponse:
+                                assign:
+                                  - workflowResponse: ${list.concat(workflowResponse,launchResult)}
+                  - condition: ${requestPayload == ""}
+                    steps:
+                      - stepAssignResponse:
+                          assign:
+                            - workflowResponse: ${list.concat(workflowResponse,"Request Payload Is Empty" + ":" + requestPayload)}
+    - return_response:
+        return: ${workflowResponse}

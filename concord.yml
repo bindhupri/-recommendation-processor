@@ -1,0 +1,220 @@
+configuration:
+  dependencies:
+    - mvn://com.walmartlabs.concord.plugins:git:0.62.0
+    - mvn://com.walmartlabs.concord.plugins:servicenow-task:latest
+  arguments:
+    project: "recommendation-processor"
+    dev_gcp_secrets_file: "/workspace/${crypto.exportAsFile('RSCE', 'sams_dev_recommendation_processor_sa_json', null)}"
+    stage_gcp_secrets_file: "/workspace/${crypto.exportAsFile('RSCE', 'sams_stage_recommendation_processor_sa_json', null)}"
+    prod_gcp_secrets_file: "/workspace/${crypto.exportAsFile('RSCE', 'sams_prod_recommendation_processor_sa_json', null)}"
+    release_version: "0.0.4"
+    cosmos_batch_size: "50000"
+    flex_template_java_main_class: "com.sams.productrecommendations.batch.RecommendationsPipelineInitializer"
+    sdk_language: "JAVA"
+    flex_template_base_image: "gcr.io/dataflow-templates-base/java17-template-launcher-base"
+    vpc_sub_network: "https://www.googleapis.com/compute/v1/projects/shared-vpc-admin/regions/us-central1/subnetworks/priv-svc-access-01"
+    location: "us-central1"
+    metadata_file: "./pipeline/metadata.json"
+    build_config_file: "recommendations_build.yaml"
+    jar_location: "./pipeline/target/recommendation-processor-${release_version}-SNAPSHOT.jar"
+    dev:
+      project_name: "dev-sams-data-generator"
+      staging_location: "gs://poc-sample-parquet/stage"
+      gcp_temp_bucket_1: "gs://poc-sample-parquet/temp"
+      gcs_temp_location: "gs://datageneratorbigquerytemp"
+      service_account: "svc-deploy-mgmt@dev-sams-data-generator.iam.gserviceaccount.com"
+      flex_template_file_location: "gs://workflow_bigquery_templates/flexTemplates/recommendation-processor-java-${release_version}.json"
+      gcs_build_log_dir: "gs://poc-sample-parquet/flex-template/logs"
+      artifactory_path_version: "us-central1-docker.pkg.dev/dev-sams-data-generator/dev-sams-data-generator/recommendation-processor:${release_version}"
+      gcs_output_file_path: "gs://processed_recommendations"
+    stage:
+      project_name: "stage-recommendation-processor"
+      staging_location: "gs://stage-poc-sample-parquet/stage"
+      gcp.temp_bucket_1: "gs://stage-poc-sample-parquet/stage"
+      gcs_temp_location: "gs://stage-datageneratorbigquerytemp"
+      service_account: "svc-deploy-mgmt@stage-recommendation-processor.iam.gserviceaccount.com"
+      flex_template_file_location: "gs://stage_workflow_bigquery_templates/flexTemplates/recommendation-processor-java-${release_version}.json"
+      gcs_build_log_dir: "gs://reco-processor-logs/flex-template/logs"
+      artifactory_path_version: "us-central1-docker.pkg.dev/stage-recommendation-processor/stage-recommendation-processor/recommendation-processor:${release_version}"
+      gcs_output_file_path: "gs://stage_processed_recommendations"
+    prod:
+      project_name: "prod-recommendation-processor"
+      staging_location: "gs://recommendation-pipeline/prod"
+      gcp.temp_bucket_1: "gs://recommendation-pipeline/prod"
+      gcs_temp_location: "gs://prod-datageneratorbigquerytemp"
+      service_account: "svc-deploy-mgmt@prod-recommendation-processor.iam.gserviceaccount.com"
+      flex_template_file_location: "gs://recommendation-pipeline/flexTemplates/recommendation-processor-java-${release_version}.json"
+      gcs_build_log_dir: "gs://prod_reco_processor_cloud_build_logs/flex-template/logs"
+      artifactory_path_version: "us-central1-docker.pkg.dev/prod-recommendation-processor/prod-recommendation-processor/recommendation-processor:${release_version}"
+      gcs_output_file_path: "gs://processed-recommendations-prod"
+
+forms:
+  recommendationProcessorDeployForm:
+    - environment: {label : "Environment to Deploy Dev or Stage or Prod", type: "string", allow: ["dev", "stage", "prod"]}
+  configForm:
+    - crqNumber: { label: "CRQ Number", type: "string" }
+
+triggers:
+  - manual:
+      name: Build Flex Template in GCP
+      entryPoint: deployToGCP
+
+
+  - github:
+      useInitiator: true
+      entryPoint: deployToGCP
+      conditions:
+        type: push
+        branch: "main"
+
+flows:
+  default:
+    - log: "-----------on Push to master branch-----------"
+    - log: "Project: ${project}"
+    - call: deployToGCP
+
+  deployToGCP:
+    - form: recommendationProcessorDeployForm
+    - log: "Project: ${project}"
+    - log: "Project: ${recommendationProcessorDeployForm.environment}"
+    - checkpoint: "Calling Child Concord"
+    - task: concord
+      in:
+        org: "RSCE"
+        action: start
+        project: "Sams-Recommendation-Processor"
+        repo: "recommendation-processor"
+        repoBranchOrTag: "main"
+        entryPoint: "deployProcessor"
+        arguments:
+          environment: ${recommendationProcessorDeployForm.environment}
+
+
+
+  deployProcessor:
+    - switch: ${environment}
+      dev:
+        - log: "Env is Dev : ${dev.project_name}"
+        - set: 
+            secret_file: ${dev_gcp_secrets_file}
+            project_name: "${dev.project_name}"
+            flex_template_file_location: ${dev.flex_template_file_location}
+            gcs_build_log_dir: ${dev.gcs_build_log_dir}
+            artifactory_path_version: ${dev.artifactory_path_version}
+            gcs_output_file_path: ${dev.gcs_output_file_path}
+            service_account: ${dev.service_account}
+            staging_location: ${dev.staging_location}
+            gcs_temp_location: ${dev.gcs_temp_location}
+            environment: "dev"
+        - call: flexDeploy
+      stage:
+        - log: "Env is Stage : ${stage.project_name}"
+        - log: "Log Storage Location : ${stage.gcs_build_log_dir}"
+        - set: 
+            secret_file: ${stage_gcp_secrets_file}
+            project_name: ${stage.project_name}
+            flex_template_file_location: ${stage.flex_template_file_location}
+            gcs_build_log_dir: ${stage.gcs_build_log_dir}
+            artifactory_path_version: ${stage.artifactory_path_version}
+            gcs_output_file_path: ${stage.gcs_output_file_path}
+            service_account: ${stage.service_account}
+            staging_location: ${stage.staging_location}
+            gcs_temp_location: ${stage.gcs_temp_location}
+            environment: "stage"
+        - call: flexDeploy
+      prod:
+        - log: "Env is Prod : ${prod.project_name}"
+        - form: configForm
+        - task: servicenow
+          in:
+            action: getChange
+            changeRecordId: ${configForm.crqNumber}
+          out:
+            changeInfo: '${result}'
+        - if: ${changeInfo.State == "Implement"}
+          then:
+            - log: "Change is valid, proceeding for the deployment"
+            - checkpoint: "Calling Child Concord For Prod Deployment"
+            - task: concord
+              in:
+                org: "RSCE"
+                action: start
+                project: "Sams-Recommendation-Processor"
+                repo: "recommendation-processor"
+                repoBranchOrTag: "main"
+                entryPoint: "prodDeploy"
+                arguments:
+                  changeInfo: ${changeInfo.State}
+
+          else:
+            - log: "Change is invalid! Change state: ${changeInfo.State}"
+            - task: slack
+              in:
+                title: "Deployment failed"
+                ignoreErrors: true
+                channelId: "C06A63M61GW"
+                username: "sams-p13n-recommendation-processor"
+                iconEmoji: ":erroredresponse:"
+                text: "Prod reco pipeline deployment failed due to CRQ, process ID ${txId}"
+                out: result
+
+            - if: "${!result.ok}"
+              then:
+                - log: "Error while sending a message: ${result.error}"
+            - throw: "Change record is currently in state: ${changeInfo.State} ... All prod deployments must be in Implement state."
+      default:
+        - set: 
+            secret_file: ${secret_file}
+            project_name: "dev-sams-data-generator"
+            flex_template_file_location: ${dev.flex_template_file_location}
+            gcs_build_log_dir: ${dev.gcs_build_log_dir}
+            artifactory_path_version: ${dev.artifactory_path_version}
+            gcs_output_file_path: ${dev.gcs_output_file_path}
+            service_account: ${dev.service_account}
+            staging_location: ${dev.staging_location}
+            gcs_temp_location: ${dev.gcs_temp_location}
+  prodDeploy:
+    - log: "Change Info is in:${changeInfo} State Deploying To Prod"
+    - set:
+        secret_file: ${prod_gcp_secrets_file}
+        project_name: ${prod.project_name}
+        flex_template_file_location: ${prod.flex_template_file_location}
+        gcs_build_log_dir: ${prod.gcs_build_log_dir}
+        artifactory_path_version: ${prod.artifactory_path_version}
+        gcs_output_file_path: ${prod.gcs_output_file_path}
+        service_account: ${prod.service_account}
+        staging_location: ${prod.staging_location}
+        gcs_temp_location: ${prod.gcs_temp_location}
+        environment: "prod"
+    - call: flexDeploy
+        
+
+  flexDeploy:
+      - docker: docker.prod.walmart.com/cloud-at-walmart/pubcloud-mgmt-tooling:latest
+        env:
+          GOOGLE_CREDENTIALS: ${secret_file}
+          PROJECT_NAME : ${project_name}
+          LOCATION: ${location}
+          METADATA_FILE: ${metadata_file}
+          FLEX_TEMPLATE_FILE_LOCATION: ${flex_template_file_location}
+          ARTIFACTORY_PATH_VERSION: ${artifactory_path_version}
+          SDK_LANGUAGE: ${sdk_language}
+          FLEX_TEMPLATE_BASE_IMAGE: ${flex_template_base_image}
+          GCS_BUILD_LOG_DIR: ${gcs_build_log_dir}
+          VPC_SUB_NETWORK: ${vpc_sub_network}
+          STAGING_LOCATION: ${staging_location}
+          GCS_TEMP_LOCATION: ${gcs_temp_location}
+          FLEX_TEMPLATE_JAVA_MAIN_CLASS: ${flex_template_java_main_class}
+          SERVICE_ACCOUNT: ${service_account}
+          BUILD_CONFIG_FILE: ${build_config_file}
+          JAR: ${jar_location}
+          RELEASE_VERSION: ${release_version}
+          OUTPUT_FILE_PATH: ${gcs_output_file_path}
+          COSMOS_BATCH_SIZE: ${cosmos_batch_size}
+          ENVIRONMENT: ${environment}
+        cmd: |
+          chmod +x ./gcp_cloud_build_run.sh
+          ./gcp_cloud_build_run.sh
+        stdout: output
+      - log: "Deploy flow logs ::::::::::::> ${output}"
+

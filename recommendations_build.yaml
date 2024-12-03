@@ -1,0 +1,33 @@
+steps:
+  - name: maven:3.9.6-eclipse-temurin-17-alpine
+    script: |
+      cd pipeline
+      mvn clean package -Dmaven.test.skip
+    waitFor: []
+  - name: bash
+    script: |
+      #!/usr/bin/env bash
+      echo "Adding Permissions to Script"
+      chmod +x ./pipeline/scripts/flex_template_workflows_build.sh
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    args: ["./pipeline/scripts/flex_template_workflows_build.sh"]
+    env:
+      - "PROJECT_ID=$_PROJECT_ID"
+      - "LOCATION=$_LOCATION"
+      - "FLEX_TEMPLATE_FILE_LOCATION=$_FLEX_TEMPLATE_FILE_LOCATION"
+      - "ARTIFACTORY_PATH_VERSION=$_ARTIFACTORY_PATH_VERSION"
+      - "SDK_LANGUAGE=$_SDK_LANGUAGE"
+      - "FLEX_TEMPLATE_BASE_IMAGE=$_FLEX_TEMPLATE_BASE_IMAGE"
+      - "GCS_BUILD_LOG_DIR=$_GCS_BUILD_LOG_DIR"
+      - "VPC_SUB_NETWORK=$_VPC_SUB_NETWORK"
+      - "STAGING_LOCATION=$_STAGING_LOCATION"
+      - "GCS_TEMP_LOCATION=$_GCS_TEMP_LOCATION"
+      - "FLEX_TEMPLATE_JAVA_MAIN_CLASS=$_FLEX_TEMPLATE_JAVA_MAIN_CLASS"
+      - "METADATA_FILE=$_METADATA_JSON_FILE"
+      - "JAR=$_JAR"
+      - "SERVICE_ACCOUNT=$_SERVICE_ACCOUNT"
+      - "OUTPUT_FILE_PATH=$_OUTPUT_FILE_PATH"
+      - "COSMOS_BATCH_SIZE=$_COSMOS_BATCH_SIZE"
+      - "ENVIRONMENT=$_ENVIRONMENT"
+options:
+  logging: CLOUD_LOGGING_ONLY

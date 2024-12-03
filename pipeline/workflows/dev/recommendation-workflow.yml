@@ -1,0 +1,262 @@
+# This is a Generic WorkFlow that Processes the Recommendations
+#
+# This workflow passes the region where the workflow is deployed
+# This Workflow passes the event payload received from input and processes them
+# A region is retrieved from the GOOGLE_CLOUD_LOCATION system variable.
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event.data}
+          severity: INFO
+    - extract_bucket_object:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+    - read_from_gcs_bucket:
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: ${bucket}
+          object: ${object}
+          alt: "media"
+        result: gcs_result_json
+        next: init
+    - init:
+        assign:
+          - requestPayloadList: ${text.split(text.decode(gcs_result_json),"\n")}
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - location: "us-central1"
+          - zone: "us-central1-a"
+          - temp_location: "gs://datageneratorbigquerytemp"
+          - serviceAccount: "svc-deploy-mgmt@dev-sams-data-generator.iam.gserviceaccount.com"
+          - usePublicIps: "false"
+          - outPutFilePath: "gs://processed_recommendations"
+          - runner: "DataflowRunner"
+          - recommendationPipelineTemplatePath: "gs://workflow_bigquery_templates/templates/RecommendationPipeline"
+          - recommendationProcessorTemplatePath: "gs://workflow_bigquery_templates/templates/RecommendationProcessor"
+          - recommendationProcessorColdTemplatePath: "gs://workflow_bigquery_templates/templates/RecommendationPipelineCold"
+          - recommendationProcessorTemplatePathToUse: ""
+          - landingPageWarmPipelinePath: "gs://workflow_bigquery_templates/templates/LandingWarmRecommendationPipeline"
+          - landingPageWarmProcessorPath: "gs://workflow_bigquery_templates/templates/LandingWarmRecommendationProcessor"
+          - landingPageColdPipelinePath: "gs://workflow_bigquery_templates/templates/LandingColdRecommendationPipeline"
+          - ryeWarmProcessorPipelinePath: "gs://workflow_bigquery_templates/templates/RyeRecommendationPipeline"
+          - uuid_var: ${uuid.generate()}
+          - processorVarWriteToCosmos: "N"
+          - processorVarWriteToBigQuery: "N"
+          - processorVarWriteToCloudStorage: "N"
+          - processorVarCardHolderRecommendation: "N"
+          - processorVarWriteToCosmos: "N"
+          - recommendationProcessorJobName: "jenkins-recommendation-processor-classic"
+          - recommendationPipelineJobName: "jenkins-recommendation-pipeline-classic"
+          - template_version: "0.0.3"
+          - template_branch: "main"
+          - failureStatuses:
+              [
+                "JOB_STATE_FAILED",
+                "JOB_STATE_CANCELLED",
+                "JOB_STATE_UPDATED",
+                "JOB_STATE_DRAINED",
+              ]
+          - currentStatus: ""
+          - workflowResponse: []
+          - currentDate: ${text.substring(time.format(sys.now()), 0, 10)}
+    - readRequestPayload:
+        for:
+          value: requestPayload
+          in: ${requestPayloadList}
+          steps:
+            - validateRequest:
+                switch:
+                  - condition: ${requestPayload != ""}
+                    steps:
+                      - stepRequestValidation:
+                          assign:
+                            - input: ${json.decode(requestPayload)}
+                      - logRequest:
+                          call: sys.log
+                          args:
+                            text: ${json.decode(requestPayload)}
+                            severity: INFO
+                      - retrive_attributes:
+                          assign:
+                            - file_path: ${input.filepath}
+                            - module: ${input.module}
+                            - feed_type: ${input.feed_type}
+                            - recommendationProcessorJobName: ${text.replace_all(recommendationProcessorJobName + "-" + module + "-" + feed_type,"_","-")}
+                    next: checkModuleType
+                next: invalid_request
+            - log_uuid:
+                call: sys.log
+                args:
+                  text: ${uuid_var}
+                  severity: INFO
+            - checkModuleType:
+                switch:
+                  - condition: ${feed_type == "warm-start"}
+                    steps:
+                      - stepFeed:
+                          switch:
+                            - condition: ${module == "savings"}
+                              steps:
+                                - stepSavingsWarm:
+                                    assign:
+                                      - processorVarWriteToBigQuery: "Y"
+                                      - file_path: ${file_path + "/*.parquet"}
+                                      - recommendationProcessorTemplatePathToUse: ${recommendationPipelineTemplatePath}
+                              next: run_recommendation_processor
+                            - condition: ${module ==  "sng_landing_page"}
+                              steps:
+                                - stepLandingWarm:
+                                    assign:
+                                      - processorVarWriteToBigQuery: "Y"
+                                      - file_path: ${file_path + "/*.parquet"}
+                                      - recommendationProcessorTemplatePathToUse: ${landingPageWarmPipelinePath}
+                              next: run_recommendation_processor
+                            - condition: ${module == "rye"}
+                              steps:
+                                - stepRye:
+                                    assign:
+                                      - processorVarWriteToCosmos: "Y"
+                                      - outPutFilePath: ${outPutFilePath + "/" + "rye_cosmos_failure" + "/" + currentDate + "/"}
+                                      - file_path: ${file_path + "/*.parquet"}
+                                      - recommendationProcessorTemplatePathToUse: ${ryeWarmProcessorPipelinePath}
+                              next: run_recommendation_processor
+                            - condition: ${module == "rye_cosmos_failure"}
+                              steps:
+                                - stepRyeFailure:
+                                    assign:
+                                      - processorVarWriteToCosmos: "Y"
+                                      - outPutFilePath: ${outPutFilePath + "/" + "rye_cosmos_failure" + "/" + currentDate + "/"}
+                                      - file_path: ${file_path + "/*.txt"}
+                                      - recommendationProcessorTemplatePathToUse: ${ryeWarmProcessorPipelinePath}
+                              next: run_recommendation_processor
+                            - condition: ${module == "landing_cosmos_failure"}
+                              steps:
+                                - stepSngFailure:
+                                    assign:
+                                      - processorVarWriteToCosmos: "Y"
+                                      - outPutFilePath: ${outPutFilePath + "/" + "rye_cosmos_failure" + "/" + currentDate + "/"}
+                                      - file_path: ${file_path + "/*.parquet"}
+                                      - recommendationProcessorTemplatePathToUse: ${ryeWarmProcessorPipelinePath}
+                              next: run_recommendation_processor
+                  - condition: ${feed_type == "cold-start"}
+                    steps:
+                      - stepModule:
+                          switch:
+                            - condition: ${module == "savings"}
+                              steps:
+                                - stepSavingsCold:
+                                    assign:
+                                      - file_path: ${file_path + "/*.parquet"}
+                                      - processorVarWriteToCloudStorage: "Y"
+                                      - recommendationProcessorTemplatePathToUse: ${recommendationProcessorColdTemplatePath}
+                              next: run_recommendation_processor
+                            - condition: ${module == "sng_landing_page"}
+                              steps:
+                                - stepLandingCold:
+                                    assign:
+                                      - file_path: ${file_path + "/*.parquet"}
+                                      - outPutFilePath: ${outPutFilePath + "/" + "sng_cosmos_failure" + "/" + currentDate + "/"}
+                                      - processorVarWriteToCosmos: "Y"
+                                      - recommendationProcessorTemplatePathToUse: ${landingPageColdPipelinePath}
+                              next: run_recommendation_processor
+            - run_recommendation_processor:
+                steps:
+                  - launchRecoPipeline:
+                      call: googleapis.dataflow.v1b3.projects.locations.templates.launch
+                      args:
+                        projectId: ${project_id}
+                        location: ${location}
+                        validateOnly: false
+                        gcsPath: ${recommendationProcessorTemplatePathToUse + "-" + template_version + "-" + template_branch}
+                        body:
+                          jobName: ${recommendationPipelineJobName + "-" + module + "-" + feed_type}
+                          parameters:
+                            inputFile: ${file_path}
+                            uuidToAudit: ${uuid_var}
+                            outPutFilePath: ${outPutFilePath}
+                            writeToCosmos: ${processorVarWriteToCosmos}
+                            writeToCloudStorage: ${processorVarWriteToCloudStorage}
+                            writeToBigQuery: ${processorVarWriteToBigQuery}
+                            module: ${module}
+                            feedType: ${feed_type}
+                            cardHolderRecommendation: ${processorVarCardHolderRecommendation}
+                          environment:
+                            machineType: "n1-highmem-8"
+                            numWorkers: 1
+                            tempLocation: ${temp_location}
+                            serviceAccountEmail: ${serviceAccount}
+                      result: launchResult
+            - check_processor:
+                switch:
+                  - condition: ${processorVarWriteToBigQuery == "Y"}
+                    next: check_job_status
+                  - condition: ${processorVarWriteToBigQuery == "N"}
+                    next: return_result
+            - check_job_status:
+                switch:
+                  - condition: ${currentStatus in failureStatuses}
+                    next: exit_fail
+                  - condition: ${currentStatus != "JOB_STATE_DONE"}
+                    next: iterate
+                  - condition: ${currentStatus == "JOB_STATE_DONE"}
+                    steps:
+                      - stepReassignVars:
+                          switch:
+                            - condition: ${module == "savings"}
+                              steps:
+                                - stepReassignSavings:
+                                    assign:
+                                      - processorVarCardHolderRecommendation: "Y"
+                                      - processorVarWriteToBigQuery: "N"
+                                      - processorVarWriteToCloudStorage: "Y"
+                                      - processorVarWriteToCosmos: "N"
+                                      - recommendationProcessorTemplatePathToUse: ${recommendationProcessorTemplatePath}
+                              next: run_recommendation_processor
+                            - condition: ${module == "sng_landing_page"}
+                              steps:
+                                - stepReassignLanding:
+                                    assign:
+                                      - outPutFilePath: ${outPutFilePath + "/" + "sng_cosmos_failure" + "/" + currentDate + "/"}
+                                      - processorVarCardHolderRecommendation: "Y"
+                                      - processorVarWriteToBigQuery: "N"
+                                      - processorVarWriteToCloudStorage: "N"
+                                      - processorVarWriteToCosmos: "Y"
+                                      - recommendationProcessorTemplatePathToUse: ${landingPageWarmProcessorPath}
+                              next: run_recommendation_processor
+            - iterate:
+                steps:
+                  - sleep30s:
+                      call: sys.sleep
+                      args:
+                        seconds: 30
+                  - get:
+                      call: googleapis.dataflow.v1b3.projects.jobs.get
+                      args:
+                        jobId: ${launchResult.job.id}
+                        projectId: ${project_id}
+                        location: ${location}
+                      result: pipelineJobResult
+                  - getStatus:
+                      assign:
+                        - currentStatus: ${pipelineJobResult.currentState}
+                  - log:
+                      call: sys.log
+                      args:
+                        text: ${"Current job status="+currentStatus}
+                      next: check_job_status
+                next: return_result
+            - exit_fail:
+                raise: ${"Job in unexpected terminal status "+currentStatus}
+            - return_result:
+                return: ${list.concat(workflowResponse,launchResult)}
+            - invalid_request:
+                steps:
+                  - stepAssignResponse:
+                      assign:
+                        - workflowResponse: ${list.concat(workflowResponse,"Invalid_Request")}
+                      next: stepInvalid
+                  - stepInvalid:
+                      raise: ${workflowResponse}

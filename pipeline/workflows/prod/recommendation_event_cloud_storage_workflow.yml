@@ -1,0 +1,128 @@
+# This is a sample workflow to test or replace with your source code.
+#
+# This workflow passes the region where the workflow is deployed
+# to the Wikipedia API and returns a list of related Wikipedia articles.
+# A region is retrieved from the GOOGLE_CLOUD_LOCATION system variable
+# unless you input your own search term; for example, {"searchTerm": "asia"}.
+main:
+  params: [event]
+  steps:
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event.data}
+          severity: INFO
+    - extract_bucket_object:
+        assign:
+          - bucket: ${event.data.bucket}
+          - object: ${event.data.name}
+    - read_from_gcs_bucket:
+        call: googleapis.storage.v1.objects.get
+        args:
+          bucket: ${bucket}
+          object: ${object}
+          alt: "media"
+        result: gcs_result_json
+        next: init
+    - init:
+        assign:
+          - input: ${json.decode(gcs_result_json)}
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - location: "us-central1"
+          - zone: "us-central1-a"
+          - temp_location: "gs://recommendation-pipeline/bigquery-temp"
+          - serviceAccount: "svc-deploy-mgmt@prod-recommendation-processor.iam.gserviceaccount.com"
+          - usePublicIps: "false"
+          - outPutFilePath: "gs://processed-recommendations-prod"
+          - runner: "DataflowRunner"
+    - log_json:
+        call: sys.log
+        args:
+          text: ${json.decode(gcs_result_json)}
+          severity: INFO
+    - retreive_attributes:
+        assign:
+          - file_path: ${input.filepath}
+          - module: ${input.module}
+          - feed_type: ${input.feed_type}
+    - checkModuleType:
+        switch:
+          - condition: ${module == "savings"}
+            next: run_savings_workflow
+          - condition: ${module == "persist"}
+            next: run_persist_complimentary_workflow
+          - condition: ${module == "complementary"}
+            next: run_persist_complimentary_workflow
+          - condition: ${module == "landing-page"}
+            next: run_recommendation_landing_page_workflow
+          - condition: ${module == "rye"}
+            next: run_rye_workflow
+    - run_savings_workflow:
+        call: googleapis.workflowexecutions.v1beta.projects.locations.workflows.executions.run
+        args:
+          workflow_id: "savings_recommendation"
+          location: ${location}
+          project_id: ${project_id}
+          argument:
+            input_file: ${file_path}
+            output_file: ${outPutFilePath + "/savings/" + text.split(feed_type,"-")[0] + "/" + text.substring(time.format(sys.now()), 0, 10)}
+            module: ${module}
+            feed_type: ${feed_type}
+            serviceAccount: ${serviceAccount}
+            project_id: ${project_id}
+            location: ${location}
+            temp_location: ${temp_location}
+        result: workflowResult
+        next: return_result
+    - run_persist_complimentary_workflow:
+        call: googleapis.workflowexecutions.v1beta.projects.locations.workflows.executions.run
+        args:
+          workflow_id: "persist_complimentary_recommendation"
+          location: ${location}
+          project_id: ${project_id}
+          argument:
+            input_file: ${file_path}
+            output_file: ${outPutFilePath + "/savings/" + text.split(feed_type,"-")[0] + "/" + text.substring(time.format(sys.now()), 0, 10)}
+            module: ${module}
+            serviceAccount: ${serviceAccount}
+            project_id: ${project_id}
+            location: ${location}
+            temp_location: ${temp_location}
+        result: workflowResult
+        next: return_result
+    - run_recommendation_landing_page_workflow:
+        call: googleapis.workflowexecutions.v1beta.projects.locations.workflows.executions.run
+        args:
+          workflow_id: "landing_page_recommendation"
+          location: ${location}
+          project_id: ${project_id}
+          argument:
+            feed_type: ${feed_type}
+            input_file: ${file_path}
+            output_file: ${outPutFilePath + "/savings/" + text.split(feed_type,"-")[0] + "/" + text.substring(time.format(sys.now()), 0, 10)}
+            module: ${module}
+            serviceAccount: ${serviceAccount}
+            project_id: ${project_id}
+            location: ${location}
+            temp_location: ${temp_location}
+        result: workflowResult
+        next: return_result
+    - run_rye_workflow:
+        call: googleapis.workflowexecutions.v1beta.projects.locations.workflows.executions.run
+        args:
+          workflow_id: "rye_recommendation"
+          location: ${location}
+          project_id: ${project_id}
+          argument:
+            feed_type: ${feed_type}
+            input_file: ${file_path}
+            module: ${module}
+            serviceAccount: ${serviceAccount}
+            project_id: ${project_id}
+            location: ${location}
+            temp_location: ${temp_location}
+            output_file: ${outPutFilePath + "/savings/" + text.split(feed_type,"-")[0] + "/" + text.substring(time.format(sys.now()), 0, 10)}
+        result: workflowResult
+        next: return_result
+    - return_result:
+        return: ${workflowResult}

@@ -1,0 +1,118 @@
+# This is a savings recommendation workflow to process Savings Recommendation.
+#
+# This workflow passes the region where the workflow is deployed
+# checks for the input file received writes the records to BigQueryTemp Table
+# then checks for the job status to be completed and then starts the
+# savings processor job that runs BigQuery Join Sql To get back the Cumulative Results.
+main:
+  params: [ input ] # [project_id,location,temp_location,serviceAccount,feed_type,input_file,output_file]
+  steps:
+    - init:
+        assign:
+          - savings_write_bigquery_job: "jenkins-recommendation-processor-savings-write"
+          - savings_read_bigquery_warm_job: "jenkins-recommendation-processor-savings-read-warm"
+          - savings_read_cold_job: "jenkins-recommendation-processor-savings-read-cold"
+          - savings_write_template_path: "gs://recommendation-pipeline/templates/SavingsBigQueryWrite"
+          - savings_read_warm_template_path: "gs://recommendation-pipeline/templates/SavingsProcessorWarm"
+          - savings_read_cold_template_path: "gs://recommendation-pipeline/templates/SavingsProcessorCold"
+          - template_version: "0.0.2"
+          - template_branch: "main"
+          - template_path_to_use: ""
+          - job_name: ""
+          - currentStatus: ""
+          - failureStatuses: [ "JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_UPDATED", "JOB_STATE_DRAINED" ]
+    - assignTemplatePaths:
+        switch:
+          - condition: ${input.feed_type == "warm-start"}
+            steps:
+              - stepA:
+                  assign:
+                    - template_path_to_use: ${savings_read_warm_template_path + "-" + template_version + "-" + template_branch}
+                    - job_name : ${savings_read_bigquery_warm_job}
+            next: bigquery_write_pipeline
+          - condition: ${input.feed_type == "cold-start"}
+            steps:
+              - stepB:
+                  assign:
+                    - template_path_to_use: ${savings_read_cold_template_path  + "-" + template_version + "-" + template_branch}
+                    - job_name: ${savings_read_cold_job}
+            next: savings_processor
+    - bigquery_write_pipeline:
+        steps:
+          - launchBigQueryWrite:
+              call: googleapis.dataflow.v1b3.projects.locations.templates.launch
+              args:
+                projectId: ${input.project_id}
+                location: ${input.location}
+                validateOnly: false
+                gcsPath: ${savings_write_template_path  + "-" + template_version + "-" + template_branch}
+                body:
+                  jobName: ${savings_write_bigquery_job}
+                  parameters:
+                    inputFile: ${input.input_file + "/*.parquet"}
+                    outPutFilePath: ${input.output_file}
+                  environment:
+                    numWorkers: 1
+                    tempLocation: ${input.temp_location}
+                    serviceAccountEmail: ${input.serviceAccount}
+              result: launchResult
+    - check_job_status:
+        switch:
+          - condition: ${currentStatus in failureStatuses}
+            next: exit_fail
+          - condition: ${currentStatus != "JOB_STATE_DONE"}
+            next: iterate
+        next: savings_processor
+    - iterate:
+        steps:
+          - sleep30s:
+              call: sys.sleep
+              args:
+                seconds: 30
+          - get:
+              call: googleapis.dataflow.v1b3.projects.jobs.get
+              args:
+                jobId: ${launchResult.job.id}
+                projectId: ${input.project_id}
+                location: ${input.location}
+              result: templateResult
+          - getStatus:
+              assign:
+                - currentStatus: ${templateResult.currentState}
+          - log:
+              call: sys.log
+              args:
+                text: ${"Current job status="+currentStatus}
+                severity: "INFO"
+              next: check_job_status
+    - savings_processor:
+        steps:
+          - logSavings:
+              call: sys.log
+              args:
+                text: ${"Inputs Used To Call API:" + input.input_file +" "+input.output_file +" "+ input.module +" "+ input.feed_type + ""+ job_name + " " + template_path_to_use}
+                severity: "INFO"
+          - launchSavingsProcessor:
+              call: googleapis.dataflow.v1b3.projects.locations.templates.launch
+              args:
+                projectId: ${input.project_id}
+                location: ${input.location}
+                validateOnly: false
+                gcsPath: ${template_path_to_use}
+                body:
+                  jobName: ${job_name}
+                  parameters:
+                    inputFile:  ${input.input_file + "/*.parquet"}
+                    outPutFilePath: ${input.output_file}
+                    module: ${input.module}
+                    feedType: ${input.feed_type}
+                  environment:
+                    numWorkers: 1
+                    tempLocation: ${input.temp_location}
+                    serviceAccountEmail: ${input.serviceAccount}
+              result: launchResult
+        next: return_result
+    - exit_fail:
+        raise: ${"Job in unexpected terminal status "+currentStatus}
+    - return_result:
+        return: ${launchResult}
