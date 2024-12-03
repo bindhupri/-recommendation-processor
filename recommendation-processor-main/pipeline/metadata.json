@@ -1,0 +1,60 @@
+{
+  "name": "Getting started Java flex template",
+  "description": "An example flex template for Java.",
+  "parameters": [
+    {
+      "name": "outPutFilePath",
+      "label": "inputFile destination",
+      "helpText": "The path and filename prefix for writing inputFile files.",
+      "isOptional": true,
+      "regexes": [
+        "^gs:\\/\\/[^\\n\\r]+$"
+      ]
+    },
+    {
+      "name": "inputFile",
+      "label": "inputFile destination",
+      "helpText": "The path and filename prefix for writing inputFile files."
+    },
+    {
+      "name": "module",
+      "label": "module",
+      "helpText": "Module To Use For Processing Recommendations"
+    },
+    {
+      "name": "feedType",
+      "label": "feedType",
+      "helpText": "Module Feed Type Warm-start or Cold-start"
+    },
+    {
+      "name": "writeToCosmos",
+      "label": "writeToCosmos",
+      "helpText": "Flag to Identify If Processed Recommendations are to be written to cosmos"
+    },
+    {
+      "name": "writeToCloudStorage",
+      "label": "writeToCloudStorage",
+      "helpText": "Flag to Identify If Processed Recommendations Are to be written to cloud storage"
+    },
+    {
+      "name": "writeToBigQuery",
+      "label": "writeToBigQuery",
+      "helpText": "Flag to identify To Write Raw Recommendations to Temp Table."
+    },
+    {
+      "name": "uuidToAudit",
+      "label": "uuidToAudit",
+      "helpText": "Unique Identifier for each workflow flow to track in audit table"
+    },
+    {
+      "name": "cardHolderRecommendation",
+      "label": "cardHolderRecommendation",
+      "helpText": "Flag to Identify and start pipeline flow at workflow"
+    },
+    {
+      "name": "cosmosBatchSize",
+      "label": "cosmosBatchSize",
+      "helpText": "Number records in batches to insert to cosmos"
+    }
+  ]
+}
